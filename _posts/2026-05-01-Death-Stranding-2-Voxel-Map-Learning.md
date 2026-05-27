@@ -1,0 +1,239 @@
+---
+title: Death Stranding 2 Voxel Map Learning
+date: 2026-05-01 01:05:SS +0800
+categories: [GameDev]
+tags: [GameDev][GDCTalk]
+---
+
+Recently, I noticed that some materials from GDC 2026 had been released. As a big fan of the Death Stranding series, the first talk I wanted to study was "'DEATH STRANDING 2': Making of Voxel 3D UI Map" by Ildar Valeev. I tried to build a small demo using the techniques described in the talk. In this article, I will go over those techniques and discuss their benefits.
+
+## Overview
+
+As many players know, Death Stranding 2 has an iconic voxel UI map that players use to plan routes before each delivery. The development team chose a voxel map because they did not want to create extra art assets for the map, but directly exporting the in-game assets for map usage would also be unrealistic. One solution is to bake the detailed game assets into a point cloud, convert the point cloud into a uniform grid, and then render the result as voxels.
+
+### Voxel Rendering
+
+The entire map contains tens of millions of voxels, so it would be unrealistic to render each voxel as an actual mesh. This becomes even more challenging when the terrain can deform in certain scenarios, such as a voidout. Even rendering each voxel as a camera-facing half-cube mesh would still be too expensive. The clever solution is to render each voxel block as a billboard quad.
+
+For each billboard quad, the shader performs a ray-box intersection test to reconstruct the actual voxel shape and discards pixels outside the voxel volume. In this way, we only pay for four vertices per block, while each block can represent up to 64 voxels. This successfully shifts much of the cost from the vertex stage to the fragment stage.
+
+### LOD
+
+We have already decoupled the number of voxels from the number of vertices we need to render. Why not take it one step further: pack multiple voxels into one billboard! 
+
+![Voxel block LOD layout](/assets/img/slide16.png)
+
+We can group multiple voxels into a voxel block, send the block data per billboard, and perform the ray-box intersection test at the block level. This further reduces vertex pressure because one billboard can now represent an entire group of voxels instead of a single voxel!
+
+An even better part is that blocks make LOD calculation and transition much easier. When shading a block, we can check its distance to the camera and decide which LOD level to use. If the block is far away from the camera, we can test the ray against one large block volume. If the block is close to the camera, we can evaluate the detailed voxel distribution inside the block and determine which voxel the ray actually hits.
+
+## Implementation
+
+### Voxel Data Structure
+
+Here is how the world data is structured:
+
+1. The world is divided into several chunks, which are grouped by Q-Pid region.
+2. Each chunk contains many voxel blocks, and a voxel block is the smallest renderable unit.
+3. Each voxel block contains up to 64 voxels in a 4x4x4 grid. Each voxel can have its own properties, such as color and roughness.
+
+Choosing a 4x4x4 layout is a smart decision because the occupancy of one voxel block can be represented by a single 64-bit mask.
+
+Based on this structure, we need two main data buffers: a per-block shape data buffer for ray-box intersection, and a per-voxel render data buffer for rendering information. Note that only existing voxels are stored in the render data buffer, which greatly reduces memory usage.
+
+### Per-Block Shape Data Buffer
+
+We pack each voxel block into four 32-bit integers. The interesting part is that we do not only store the detailed shape mask for the 4x4x4 voxel block, but also reserve 8 bits to describe the occupancy of a coarser 2x2x2 grid. This makes LOD selection and transition much easier to handle in the shader.
+
+![Block render data packing](/assets/img/slide20.png)
+
+```
+struct BlockRenderData
+{
+    uint shapeLevelAndLocation;
+    uint shapeMaskLow;
+    uint shapeMaskHigh;
+    uint renderStartIndex;
+};
+
+```
+- `shapeLevelAndLocation`: The first 8 bits describe the occupancy of the 2x2x2 coarse grid, and the remaining bits store the block's local location index
+- `shapeMaskLow` and `shapeMaskHigh`: These two integers provide 64 bits in total, describing the occupancy of the 4x4x4 voxel block
+- `renderStartIndex`: The start index of this block in the render data buffer. For example, `renderData[renderStartIndex + 1]` retrieves the render data of the second occupied voxel in this block
+
+### Per-Voxel Render Data Buffer
+
+This part is simpler. We pack all the rendering information into a single 32-bit integer.
+
+![Voxel render data packing](/assets/img/slide21.png)
+
+```
+struct VoxelRenderData
+{
+    uint packedData;
+};
+```
+
+In my demo, the packing is same as the one in the slide above:
+- RGB: 24 bits
+- material/extra: 8 bits
+
+### Terrian Data Generation
+
+Now that the data structures are defined, the next step is to generate some terrain data for the renderer. In the original presentation, the team captured the actual game world by scanning assets from different directions and converting the result into a point grid. For this demo, I wanted to focus more on the voxel rendering technique itself, so I used a simpler data generation pipeline.
+
+In my implementation, there are two terrain sources: height map terrain and procedural terrain. For the height map mode, the user provides a height map and a matching color map. The height map determines the voxel height, while the color map provides the per-voxel color data. For the procedural mode, the terrain is generated from noise functions, so the user can experiment with different noise types and parameters without preparing texture assets.
+
+Height map terrian:
+
+![Height map terrain result](/assets/img/heightmap_terrian.png)
+
+Procedural terrian:
+
+![Procedural terrain result](/assets/img/procedural_terrian.png)
+
+Although the input sources are different, both paths eventually produce the same kind of voxel data. Conceptually, the process is:
+
+1. Sample the terrain source
+2. Convert each sample into one or more voxel positions
+3. Group voxels into 4x4x4 voxel blocks
+4. Build the shape data buffer and render data buffer used by the shader
+
+To reduce this cost, I use Unity's Job System together with Burst for the procedural generation path. Each `(x, z)` terrain sample is independent, which makes it a good fit for `IJobParallelFor`. Instead of generating voxels one by one on the main thread, the job distributes the sampling work across worker threads. Each job index maps to one terrain coordinate, evaluates the selected noise function, applies optional effects such as the crater deformation, and writes the resulting voxel positions into a native container.
+
+The simplified logic looks like this:
+```csharp
+[BurstCompile]
+struct ProceduralVoxelGenerationJob : IJobParallelFor
+{
+    public int2 MapSize;
+    public float3 MapScale;
+    public int ShellDepth;
+    public NativeParallelHashSet<int3>.ParallelWriter Voxels;
+
+    public void Execute(int index)
+    {
+        int x = index % MapSize.x;
+        int z = index / MapSize.x;
+
+        float height = SampleHeight(x, z);
+
+        for (int layer = 0; layer < ShellDepth; layer++)
+        {
+            int3 voxel = ConvertToVoxelCoord(x, z, height, layer);
+            Voxels.Add(voxel);
+        }
+    }
+}
+```
+
+After the raw voxel positions are generated, I build the voxel block map. Each voxel is converted into a block coordinate and a local bit inside that block. Note that all of the data containers here are the native ones. Like `NativeParallelHashSet<int3>` instead of `HashSet<Vector3Int>`. We only convert it back to the normal one when all the processing is done and it's ready for uploading to the GPU.
+
+### Voxel Rendering
+
+With all the data ready, now we can pass them into the shader and render the voxels!
+As we mentioned before, we render all the blocks as billboards, and we do `Graphics.DrawMeshInstancedProcedural` as below:
+
+```
+Graphics.DrawMeshInstancedProcedural(
+    _quadMesh,
+    0,
+    _material,
+    _renderBounds,
+    _blockCount,
+    _propertyBlock);
+```
+
+#### Vertex Shader
+In the vertex shader, we calculate the billboard and apply the optional reveal animation. The pseudo code is as below:
+
+```
+Varyings Vert(Attributes input)
+{
+    Varyings output;
+
+    prepareBlockData();
+    
+    // optional
+    applyAnimation();
+    
+    // 3 is a number that is big enough to cover all voxels
+    float billboardSize = block.size * 3;
+
+    // Do billboard calculation
+    float3 positionWS =
+        block.center
+        + _CameraRightWS.xyz * input.positionOS.x * billboardSize
+        + _CameraUpWS.xyz * input.positionOS.y * billboardSize;
+
+    output.positionWS = positionWS;
+    output.positionCS = TransformWorldToHClip(positionWS);
+    output.boundsMin = ...
+    // Set all required data...
+
+    return output;
+}
+```
+
+Note that for our requirements, we want the quads always parallel to the screen, so what we have to do is: 
+
+1. Pass the camera axis to the shader
+2. "Extend" the quad along the camera axis
+
+And then we will get quads we want. 
+
+#### Fragment Shader
+The fragment shader is more compute extensive. 
+
+
+```
+FragOutput Frag(Varyings input)
+{
+    float3 rayOrigin = _WorldSpaceCameraPos;
+    float3 rayDir = normalize(input.positionWS - rayOrigin);
+
+    prepareBlockData();
+
+    if (shouldDiscardByAnimation(block))
+        discard;
+
+    selectLODLevel();
+
+    if(!traceBlock(out hitInfo))
+        discard;
+
+    FragOutput output;
+    output.color = shadeVoxel(hitInfo);
+    applyAnimation();
+
+    return output;
+}
+```
+
+- LOD transition
+- DDA
+- Fade out at boundary
+
+
+## Additional Effects
+
+After the backbone mechanism is ready, we can start to create some different effects.
+
+### Crate Effects
+This is like the void out crate from the game. We can specify the x, z position of where is the crate, and how deep is the crate and lower the terrian:
+
+![Crater effect result](/assets/img/crate.png)
+
+### Reveal Animation
+Here I made a reveal animation effect which will show the voxels from the center to boundary.
+
+![Voxel reveal animation](/assets/img/animation.gif)
+
+### LOD Transition Dithering
+
+## Future Work
+- Use a sort-and-reduce pipeline to make the block aggregation more parallel-friendly, but that would also add more complexity.
+- GPU frustum culling
+
+# References
+https://gdcvault.com/play/1035737/-DEATH-STRANDING-2-Making
