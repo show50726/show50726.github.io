@@ -5,11 +5,27 @@ categories: [GameDev]
 tags: [GameDev][GDCTalk]
 ---
 
-Recently, I noticed that some materials from GDC 2026 had been released. As a big fan of the Death Stranding series, the first talk I wanted to study was "'DEATH STRANDING 2': Making of Voxel 3D UI Map" by Ildar Valeev. I tried to build a small demo using the techniques described in the talk. In this article, I will go over those techniques and discuss their benefits.
+Recently, I noticed that some materials from GDC 2026 had been released. As a big fan of the Death Stranding series, the first talk I wanted to study was "'DEATH STRANDING 2': Making of Voxel 3D UI Map" by Ildar Valeev. I tried to build a small demo using the techniques described in the talk. In this article, I will go over those techniques and discuss their benefits. Note that I don't have the access to the presentation video, so all the contents below are inferred from the slides.
 
 ## Overview
 
-As many players know, Death Stranding 2 has an iconic voxel UI map that players use to plan routes before each delivery. The development team chose a voxel map because they did not want to create extra art assets for the map, but directly exporting the in-game assets for map usage would also be unrealistic. One solution is to bake the detailed game assets into a point cloud, convert the point cloud into a uniform grid, and then render the result as voxels.
+As many players know, Death Stranding 2 has an iconic 3D voxel UI map that players use to plan routes before each delivery. Compare to Death Stranding 1, the map is fully 3D this time and which makes the planning experience even better. Before diving into the implementation details, let's look at what are the goals the development team set in mind:
+
+![Requirements](/assets/img/slide4.png)
+
+
+After looking at the first three points, you might have an idea about why they choose the voxel map. To have the fully 3D map and accurate representation at the same time, the most intuitive idea is to "down sample" the original assets, so that there will be no extra assets required while it can accurately reflect the terrian shape from the real assets.
+
+### Getting 3D Data from the Assets
+
+To capture the terrian and convert them to the format for voxel rendering, they choose to do a pre-processing. Where they have multiple passes to render the terrian from different angles, including
+
+1. Hemisphere Pass, which distributes the cameras along a hemisphere and look at the center of the terrian
+2. XYZ Slice Pass, which distributes the cameras along three axis and get "orthogonal" capture
+
+After those passes, they will convert the distributed points into uniform point grid, then it'll be fitting better to voxel rendering.
+
+![Data Capture](/assets/img/slide4.png)
 
 ### Voxel Rendering
 
