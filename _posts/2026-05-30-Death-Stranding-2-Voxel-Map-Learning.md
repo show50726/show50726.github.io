@@ -1,11 +1,13 @@
----
+﻿---
 title: Death Stranding 2 Voxel Map Learning
-date: 2026-05-01 01:05:SS +0800
+date: 2026-05-30 00:53:35 +0800
 categories: [GameDev]
-tags: [GameDev][GDCTalk]
+tags: [GameDev, GDCTalk]
 ---
 
 Recently, I noticed that some materials from GDC 2026 had been released. As a big fan of the Death Stranding series, the first talk I wanted to study was "'DEATH STRANDING 2': Making of Voxel 3D UI Map" by Ildar Valeev. I tried to build a small demo using the techniques described in the talk. In this article, I will go over those techniques and discuss their benefits. Note that I don't have access to the presentation video, so all the contents below are inferred from the slides.
+
+Demo source code: [Death Stranding Voxel Map](https://github.com/show50726/Death-Stranding-Voxel-Map)
 
 ## Overview
 
@@ -323,5 +325,6 @@ If you look closely at the voxel map in Death Stranding 2, you can notice that v
 - Consider doing GPU frustum culling for quads outside the view frustum to reduce unnecessary draws.
 
 # References
-https://gdcvault.com/play/1035737/-DEATH-STRANDING-2-Making
-https://voxel.wiki/wiki/raycasting/
+- [GDC Vault - DEATH STRANDING 2: Making of Voxel 3D UI Map](https://gdcvault.com/play/1035737/-DEATH-STRANDING-2-Making)
+- [Voxel raycasting](https://voxel.wiki/wiki/raycasting/)
+- [Demo source code](https://github.com/show50726/Death-Stranding-Voxel-Map)
