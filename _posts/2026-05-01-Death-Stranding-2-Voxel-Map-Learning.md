@@ -18,12 +18,12 @@ After looking at the first three points, you might have an idea about why they c
 
 ### Getting 3D Data from the Assets
 
-The development team chose a pre-processing way to capture the terrain and convert the captured data into a format suitable for voxel rendering. Where they have multiple passes to render the terrain from different angles, including
+The development team used a preprocessing approach to capture the terrain and convert the captured data into a format suitable for voxel rendering, where they have multiple passes to render the terrain from different angles, including
 
 1. Hemisphere Pass, which distributes the cameras along a hemisphere and look at the center of the terrain
 2. XYZ Slice Pass, which distributes the cameras along three axis and get "orthogonal" capture
 
-After those passes, they will convert the distributed points into uniform point grid, then it'll be fitting better to voxel rendering.
+After these passes, the captured points are converted into a uniform point grid, which is more suitable for voxel rendering.
 
 ![Data Capture](/assets/img/ds2/slide10.png)
 
@@ -43,7 +43,7 @@ Instead of rendering one billboard per voxel, the team groups multiple voxels in
 
 ![Voxel block LOD layout](/assets/img/ds2/slide16.png)
 
-An even better part is that blocks make LOD calculation and transition much easier. Depending on the distance from the camera, the shader can test the ray against different levels of the same block:
+Another benefit is that blocks make LOD selection and transitions much easier. Depending on the distance from the camera, the shader can test the ray against different levels of the same block:
 
 - Level 0: whole block bounding box
 - Level 1: 2x2x2 coarse grid
@@ -53,7 +53,7 @@ When the block is far away, Level 0 is enough because the viewer cannot see the 
 
 ## Demo Implementation
 
-We've walked through all the main ideas of the voxel map in Death Stranding 2, we can start to implement it in Unity! Let's start from defining the data structures.
+Now that we have walked through the main ideas behind the voxel map in Death Stranding 2, we can start implementing it in Unity! Let's start from defining the data structures.
 
 ### Voxel Data Structure
 
@@ -255,7 +255,7 @@ Function FragmentShader(PixelInput input):
     if (BlockIsNotVisible(blockData)):
         Discard()
 
-    // 2. Ray Marching
+    // 2. Ray Traversal
     lodLevel = DetermineLOD(DistanceToCamera)
     hitResult = TraceRayAgainstVoxels(ray, blockData, lodLevel)
     
