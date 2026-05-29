@@ -14,18 +14,18 @@ As many players know, Death Stranding 2 has an iconic 3D voxel UI map that playe
 ![Requirements](/assets/img/slide4.png)
 
 
-After looking at the first three points, you might have an idea about why they choose the voxel map. To have the fully 3D map and accurate representation at the same time, the most intuitive idea is to "down sample" the original assets, so that there will be no extra assets required while it can accurately reflect the terrian shape from the real assets.
+After looking at the first three points, you might have an idea about why they choose the voxel map: To have the fully 3D map and accurate representation at the same time, the most intuitive idea is to "down sample" the original assets, so that there will be no extra assets required while it can accurately reflect the terrian shape from the real assets.
 
 ### Getting 3D Data from the Assets
 
-To capture the terrian and convert them to the format for voxel rendering, they choose to do a pre-processing. Where they have multiple passes to render the terrian from different angles, including
+The development team choose a pre-processing way to capture the terrian and convert them to the format for voxel rendering. Where they have multiple passes to render the terrian from different angles, including
 
 1. Hemisphere Pass, which distributes the cameras along a hemisphere and look at the center of the terrian
 2. XYZ Slice Pass, which distributes the cameras along three axis and get "orthogonal" capture
 
 After those passes, they will convert the distributed points into uniform point grid, then it'll be fitting better to voxel rendering.
 
-![Data Capture](/assets/img/slide4.png)
+![Data Capture](/assets/img/slide10.png)
 
 ### Voxel Rendering
 
@@ -37,13 +37,13 @@ For each billboard quad, the shader performs a ray-box intersection test to reco
 
 ### LOD
 
-We have already decoupled the number of voxels from the number of vertices we need to render. Why not take it one step further: pack multiple voxels into one billboard! 
+With the number of voxels decoupled from the number of vertices required to render. The development team took it one step further: pack multiple voxels into one billboard! 
 
-We can group multiple voxels into a voxel block, send the block data per billboard, and perform the ray-box intersection test at the block level. This further reduces vertex pressure because one billboard can now represent an entire group of voxels instead of a single voxel!
+They group multiple voxels into a voxel block, send the block data per billboard, and perform the ray-box intersection test at the block level. This further reduces vertex pressure because one billboard can now represent an entire group of voxels instead of a single voxel!
 
 ![Voxel block LOD layout](/assets/img/slide16.png)
 
-An even better part is that blocks make LOD calculation and transition much easier. When shading a block, we can check its distance to the camera and decide which LOD level to use. If the block is far away from the camera, we can test the ray against one large block volume. If the block is close to the camera, we can evaluate the detailed voxel distribution inside the block and determine which voxel the ray actually hits.
+An even better part is that blocks make LOD calculation and transition much easier. When shading a block, we can check its distance to the camera and decide which LOD level to use. If the block is far away from the camera, test the ray against one large block volume. Otherwise, evaluate the detailed voxel distribution inside the block and determine which voxel the ray actually hits.
 
 ## Demo Implementation
 
@@ -273,31 +273,46 @@ For the ray marching part, we leveraged the 3D DDA algorithm to efficiently trav
 
 ## Results
 
-Finally, we got the 3D voxel map working!
+Finally, the 3D voxel map is working!
 
-number, fps, graphics card
+[![Results](https://img.youtube.com/vi/Z1M5-WzMYIk/0.jpg)](https://www.youtube.com/watch?v=Z1M5-WzMYIk)
+
+For a terrain space of roughly 2048x2048x256 voxels, the demo can run at more than 100 FPS steadily on my GTX 1080.
 
 ## Additional Effects
 
-After the backbone mechanism is ready, we can start to create some different effects.
+After the core rendering pipeline was working, I started experimenting with a few additional effects.
 
-### Crate Effects
-This is like the void out crate from the game. We can specify the x, z position of where is the crate, and how deep is the crate and lower the terrian:
+### Crater Effects
+This effect is inspired by the voidout crater from the game. We can specify the crater's XZ position, radius, blend width, and depth, then lower the terrain around that area.
 
 ![Crater effect result](/assets/img/crate.png)
 
+It is important to add a smooth transition around the crater boundary so the deformation blends naturally into the surrounding terrain.
+
 ### Reveal Animation
-Here I made a reveal animation effect which will show the voxels from the center to boundary.
+I also added a reveal animation that makes the voxel map appear outward from a given starting point. The shader evaluates each block's distance from the reveal center, then uses that distance to decide whether the block should be hidden, rising, or fully visible.
 
 ![Voxel reveal animation](/assets/img/animation.gif)
 
+### Shape Mask
+I added a shape mask during terrain generation so the terrain does not always end up as a rectangle. This makes the result feel more like a real terrain map.
+
+![Shape mask](/assets/img/shape.png)
+
 ### LOD Transition Dithering
+To make LOD transitions less abrupt, I experimented with a dithering effect. However, after testing it, I found that dithering might not be a good fit for voxel rendering. Finding a better way to handle LOD transitions for voxels would be an interesting topic to investigate further.
 
 ### Boundary Fade Out Effect
+If you look closely at the voxel map in Death Stranding 2, you can notice that voxels near the camera seem to shrink before disappearing as the camera moves closer. In my current implementation, the voxels simply pop away. My guess is that this is related to the LOD transition mentioned above. Their transition may include a voxel shrink behavior, which also helps close-range culling look smoother.
 
 ## Future Work
-- Use a sort-and-reduce pipeline to make the block aggregation more parallel-friendly, but that would also add more complexity.
-- GPU frustum culling
+
+### Build time optimization
+- Use a sort-and-reduce pipeline to make block aggregation more parallel-friendly and further accelerate render data build time.
+
+### GPU frustum culling
+- Consider doing GPU frustum culling for quads outside the view frustum to reduce unnecessary draws.
 
 # References
 https://gdcvault.com/play/1035737/-DEATH-STRANDING-2-Making
