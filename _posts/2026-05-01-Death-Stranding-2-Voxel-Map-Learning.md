@@ -11,7 +11,7 @@ Recently, I noticed that some materials from GDC 2026 had been released. As a bi
 
 As many players know, Death Stranding 2 has an iconic 3D voxel UI map that players use to plan routes before each delivery. Compare to Death Stranding 1, the map is fully 3D this time and which makes the planning experience even better. Before diving into the implementation details, let's look at what are the goals the development team set in mind:
 
-![Requirements](/assets/img/slide4.png)
+![Requirements](/assets/img/ds2/slide4.png)
 
 
 After looking at the first three points, you might have an idea about why they choose the voxel map: To have the fully 3D map and accurate representation at the same time, the most intuitive idea is to "down sample" the original assets, so that there will be no extra assets required while it can accurately reflect the terrian shape from the real assets.
@@ -25,7 +25,7 @@ The development team choose a pre-processing way to capture the terrian and conv
 
 After those passes, they will convert the distributed points into uniform point grid, then it'll be fitting better to voxel rendering.
 
-![Data Capture](/assets/img/slide10.png)
+![Data Capture](/assets/img/ds2/slide10.png)
 
 ### Voxel Rendering
 
@@ -33,7 +33,7 @@ The entire map contains tens of millions of voxels, so it would be unrealistic t
 
 For each billboard quad, the shader performs a ray-box intersection test to reconstruct the actual voxel shape and discards pixels outside the voxel volume. In this way, we only pay for four vertices per block, while each block can represent up to 64 voxels. This successfully shifts much of the cost from the vertex stage to the fragment stage.
 
-![Billboard](/assets/img/slide15.png)
+![Billboard](/assets/img/ds2/slide15.png)
 
 ### LOD
 
@@ -41,7 +41,7 @@ With the number of voxels decoupled from the number of vertices required to rend
 
 They group multiple voxels into a voxel block, send the block data per billboard, and perform the ray-box intersection test at the block level. This further reduces vertex pressure because one billboard can now represent an entire group of voxels instead of a single voxel!
 
-![Voxel block LOD layout](/assets/img/slide16.png)
+![Voxel block LOD layout](/assets/img/ds2/slide16.png)
 
 An even better part is that blocks make LOD calculation and transition much easier. When shading a block, we can check its distance to the camera and decide which LOD level to use. If the block is far away from the camera, test the ray against one large block volume. Otherwise, evaluate the detailed voxel distribution inside the block and determine which voxel the ray actually hits.
 
@@ -102,7 +102,7 @@ Based on this structure, we need two main data buffers: a per-block shape data b
 
 We pack each voxel block into four 32-bit integers. The interesting part is that we do not only store the detailed shape mask for the 4x4x4 voxel block, but also reserve 8 bits to describe the occupancy of a coarser 2x2x2 grid. This makes LOD selection and transition much easier to handle in the shader.
 
-![Block render data packing](/assets/img/slide20.png)
+![Block render data packing](/assets/img/ds2/slide20.png)
 
 ```
 struct BlockRenderData
@@ -121,7 +121,7 @@ struct BlockRenderData
 
 This part is simpler. We pack all the rendering information into a single 32-bit integer.
 
-![Voxel render data packing](/assets/img/slide21.png)
+![Voxel render data packing](/assets/img/ds2/slide21.png)
 
 ```
 struct VoxelRenderData
@@ -142,11 +142,11 @@ In my implementation, there are two terrain sources: height map terrain and proc
 
 Height map terrian:
 
-![Height map terrain result](/assets/img/heightmap_terrian.png)
+![Height map terrain result](/assets/img/ds2/heightmap_terrian.png)
 
 Procedural terrian:
 
-![Procedural terrain result](/assets/img/procedural_terrian.png)
+![Procedural terrain result](/assets/img/ds2/procedural_terrian.png)
 
 Although the input sources are different, both paths eventually produce the same kind of voxel data. Conceptually, the process is:
 
@@ -286,25 +286,27 @@ After the core rendering pipeline was working, I started experimenting with a fe
 ### Crater Effects
 This effect is inspired by the voidout crater from the game. We can specify the crater's XZ position, radius, blend width, and depth, then lower the terrain around that area.
 
-![Crater effect result](/assets/img/crate.png)
+![Crater effect result](/assets/img/ds2/crater.png)
 
 It is important to add a smooth transition around the crater boundary so the deformation blends naturally into the surrounding terrain.
 
 ### Reveal Animation
 I also added a reveal animation that makes the voxel map appear outward from a given starting point. The shader evaluates each block's distance from the reveal center, then uses that distance to decide whether the block should be hidden, rising, or fully visible.
 
-![Voxel reveal animation](/assets/img/animation.gif)
+![Voxel reveal animation](/assets/img/ds2/animation.gif)
 
 ### Shape Mask
 I added a shape mask during terrain generation so the terrain does not always end up as a rectangle. This makes the result feel more like a real terrain map.
 
-![Shape mask](/assets/img/shape.png)
+![Shape mask](/assets/img/ds2/shape.png)
 
 ### LOD Transition Dithering
 To make LOD transitions less abrupt, I experimented with a dithering effect. However, after testing it, I found that dithering might not be a good fit for voxel rendering. Finding a better way to handle LOD transitions for voxels would be an interesting topic to investigate further.
 
 ### Boundary Fade Out Effect
 If you look closely at the voxel map in Death Stranding 2, you can notice that voxels near the camera seem to shrink before disappearing as the camera moves closer. In my current implementation, the voxels simply pop away. My guess is that this is related to the LOD transition mentioned above. Their transition may include a voxel shrink behavior, which also helps close-range culling look smoother.
+
+![Boundary](/assets/img/ds2/boundary.gif)
 
 ## Future Work
 
