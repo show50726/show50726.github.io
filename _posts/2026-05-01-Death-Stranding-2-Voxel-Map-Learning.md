@@ -33,21 +33,62 @@ The entire map contains tens of millions of voxels, so it would be unrealistic t
 
 For each billboard quad, the shader performs a ray-box intersection test to reconstruct the actual voxel shape and discards pixels outside the voxel volume. In this way, we only pay for four vertices per block, while each block can represent up to 64 voxels. This successfully shifts much of the cost from the vertex stage to the fragment stage.
 
+![Billboard](/assets/img/slide15.png)
+
 ### LOD
 
 We have already decoupled the number of voxels from the number of vertices we need to render. Why not take it one step further: pack multiple voxels into one billboard! 
 
-![Voxel block LOD layout](/assets/img/slide16.png)
-
 We can group multiple voxels into a voxel block, send the block data per billboard, and perform the ray-box intersection test at the block level. This further reduces vertex pressure because one billboard can now represent an entire group of voxels instead of a single voxel!
+
+![Voxel block LOD layout](/assets/img/slide16.png)
 
 An even better part is that blocks make LOD calculation and transition much easier. When shading a block, we can check its distance to the camera and decide which LOD level to use. If the block is far away from the camera, we can test the ray against one large block volume. If the block is close to the camera, we can evaluate the detailed voxel distribution inside the block and determine which voxel the ray actually hits.
 
-## Implementation
+## Demo Implementation
+
+We've walked through all the main ideas of the voxel map in Death Straning 2, we can start to implement it in Unity! Let's start from defining the data structures.
 
 ### Voxel Data Structure
 
 Here is how the world data is structured:
+
+```
++-------------------------------------------------------------------+
+|                        Q-PID REGION / WORLD                       |
++-------------------------------------------------------------------+
+                                  |
+                                  v
++-------------------------------------------------------------------+
+|                              CHUNK                                |
+|                                                                   |
+|   +---------------+     +---------------+     +---------------+   |
+|   |  Voxel Block  |     |  Voxel Block  |     |  Voxel Block  |   |
+|   +---------------+     +---------------+     +---------------+   |
+|   | (Smallest     |     |                 |     |                 |   |
+|   |  Renderable)  |     |                 |     |                 |   |
+|   +-------+-------+     +---------------+     +---------------+   |
++-----------|-------------------------------------------------------+
+            |
+            | Expands to 4x4x4 Grid (Up to 64 Voxels)
+            v
+        +---+---+---+---+
+       /   /   /   /   /|
+      +---+---+---+---+ +
+     /   /   /   /   /|/|
+    +---+---+---+---+ + +
+   /   /   /   /   /|/|/|
+  +---+---+---+---+ + + +
+  |   |   |   |   |/|/|/|
+  +---+---+---+---+ + + +
+  |   | V |   |   |/|/|/|  --->  [ Single Voxel (V) ]
+  +---+---+---+---+ + + +        +------------------+
+  |   |   |   |   |/|/|/         | Properties:      |
+  +---+---+---+---+ +            | * Color          |
+  |   |   |   |   |/             | * Roughness      |
+  +---+---+---+---+              +------------------+
+
+```
 
 1. The world is divided into several chunks, which are grouped by Q-Pid region.
 2. Each chunk contains many voxel blocks, and a voxel block is the smallest renderable unit.
@@ -71,7 +112,6 @@ struct BlockRenderData
     uint shapeMaskHigh;
     uint renderStartIndex;
 };
-
 ```
 - `shapeLevelAndLocation`: The first 8 bits describe the occupancy of the 2x2x2 coarse grid, and the remaining bits store the block's local location index
 - `shapeMaskLow` and `shapeMaskHigh`: These two integers provide 64 bits in total, describing the occupancy of the 4x4x4 voxel block
@@ -164,72 +204,78 @@ Graphics.DrawMeshInstancedProcedural(
 In the vertex shader, we calculate the billboard and apply the optional reveal animation. The pseudo code is as below:
 
 ```
-Varyings Vert(Attributes input)
-{
-    Varyings output;
+Function VertexShader(VertexInput input):
+    // 1. Fetch base data for the current Voxel block
+    blockData = ReadBuffer(input.InstanceID)
+    blockBounds = CalculateBoundsAndCenter(blockData, gridOrigin, worldBlockSize)
 
-    prepareBlockData();
-    
-    // optional
-    applyAnimation();
-    
-    // 3 is a number that is big enough to cover all voxels
-    float billboardSize = block.size * 3;
+    // 2. Handle reveal animation (e.g., emerging from the ground)
+    progress = CalculateAnimationProgress(blockBounds.Center, effectCenter)
+    if (AnimationEnabled):
+        blockBounds.Y += CalculateRiseAndBounceOffset(progress)
 
-    // Do billboard calculation
-    float3 positionWS =
-        block.center
-        + _CameraRightWS.xyz * input.positionOS.x * billboardSize
-        + _CameraUpWS.xyz * input.positionOS.y * billboardSize;
+    // 3. Billboard expansion
+    // Expand the vertex towards the camera's "Right" and "Up" vectors to cover the 3D block
+    billboardSize = blockBounds.Size * 3
+    worldPos = blockBounds.Center 
+             + (CameraRightVector * input.LocalX * billboardSize)
+             + (CameraUpVector * input.LocalY * billboardSize)
 
-    output.positionWS = positionWS;
-    output.positionCS = TransformWorldToHClip(positionWS);
-    output.boundsMin = ...
-    // Set all required data...
+    // 4. Space transformation and data passing
+    screenClipPos = TransformToClipSpace(worldPos)
 
-    return output;
-}
+    // Pass necessary data to the Fragment Shader
+    Output screenClipPos, worldPos, blockBounds, input.InstanceID
 ```
 
-Note that for our requirements, we want the quads always parallel to the screen, so what we have to do is: 
+Note that our implementation requires the quads to remain parallel to the screen at all times. To achieve this, we:
 
-1. Pass the camera axis to the shader
-2. "Extend" the quad along the camera axis
+1. Pass the camera orientation vectors (Right and Up) to the shader.
+2. Expand the quad vertices outward along these camera axes.
 
-And then we will get quads we want. 
+This guarantees that the resulting billboards stay perfectly aligned with the view plane.
 
 #### Fragment Shader
-The fragment shader is more compute extensive. 
+The fragment shader is more compute-intensive. First, we determine which LOD we are using. If rendering at a highly-detailed LOD, we ray march to identify exactly which voxel is hit. Otherwise, we simply perform a ray-box intersection against the entire block.
 
+Next, we use the hit information to perform lighting and depth calculations. Furthermore, because the target geometry is merely a flat billboard, we must explicitly override the depth buffer with the true depth of the intersected voxel.
 
 ```
-FragOutput Frag(Varyings input)
-{
-    float3 rayOrigin = _WorldSpaceCameraPos;
-    float3 rayDir = normalize(input.positionWS - rayOrigin);
+Function FragmentShader(PixelInput input):
+    // 1. Setup & Early Culling
+    ray = CreateRayFromCamera(input.WorldPos)
+    blockData = GetBlockData(input.BlockIndex)
+    
+    if (BlockIsNotVisible(blockData)):
+        Discard()
 
-    prepareBlockData();
+    // 2. Ray Marching
+    lodLevel = DetermineLOD(DistanceToCamera)
+    hitResult = TraceRayAgainstVoxels(ray, blockData, lodLevel)
+    
+    if (not hitResult.IsHit):
+        Discard()
 
-    if (shouldDiscardByAnimation(block))
-        discard;
+    // 3. Depth Override
+    Output.Depth = CalculateTrueDepth(hitResult.WorldPosition)
 
-    selectLODLevel();
+    // 4. Material & Shading
+    material = DecodeVoxelMaterial(blockData, hitResult.LocalPosition)
+    ambientOcclusion = CalculateVoxelAO(blockData, hitResult)
+    
+    finalColor = CalculateLighting(material, ambientOcclusion, SceneLights)
 
-    if(!traceBlock(out hitInfo))
-        discard;
-
-    FragOutput output;
-    output.color = shadeVoxel(hitInfo);
-    applyAnimation();
-
-    return output;
-}
+    // 5. Output
+    Output finalColor, Output.Depth
 ```
 
-- LOD transition
-- DDA
-- Fade out at boundary
+For the ray marching part, we leveraged the 3D DDA algorithm to efficiently traverse the voxel grid. The DDA algorithm calculates the intersection of a ray with a grid of cells. It does this by calculating the intersection of the ray with each cell in the grid, and then taking the minimum of all the intersections and step sizes along the ray until the ray exits the grid or hits a non-empty voxel. Please refer to [this link](https://voxel.wiki/wiki/raycasting/) for more details.
 
+## Results
+
+Finally, we got the 3D voxel map working!
+
+number, fps, graphics card
 
 ## Additional Effects
 
@@ -247,9 +293,12 @@ Here I made a reveal animation effect which will show the voxels from the center
 
 ### LOD Transition Dithering
 
+### Boundary Fade Out Effect
+
 ## Future Work
 - Use a sort-and-reduce pipeline to make the block aggregation more parallel-friendly, but that would also add more complexity.
 - GPU frustum culling
 
 # References
 https://gdcvault.com/play/1035737/-DEATH-STRANDING-2-Making
+https://voxel.wiki/wiki/raycasting/
