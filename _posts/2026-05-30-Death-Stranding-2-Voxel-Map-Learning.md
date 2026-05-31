@@ -20,10 +20,10 @@ After looking at the first three points, you might have an idea about why they c
 
 ### Getting 3D Data from the Assets
 
-The development team used a preprocessing approach to capture the terrain and convert the captured data into a format suitable for voxel rendering, where they have multiple passes to render the terrain from different angles, including
+The development team used a preprocessing approach to capture the terrain and convert the captured data into a format suitable for voxel rendering, where they have multiple passes to render the terrain from different angles, including:
 
 1. Hemisphere Pass, which distributes the cameras along a hemisphere and look at the center of the terrain
-2. XYZ Slice Pass, which distributes the cameras along three axis and get "orthogonal" capture
+2. XYZ Slice Pass, which distributes the cameras along three axis to get "orthogonal" captures
 
 After these passes, the captured points are converted into a uniform point grid, which is more suitable for voxel rendering.
 
@@ -196,9 +196,18 @@ After the raw voxel positions are generated, I build the voxel block map. Each v
 ### Voxel Rendering
 
 With all the data ready, now we can pass them into the shader and render the voxels!
+
+At this point, the renderer provides two structured buffers:
+
+- `BlockRenderData`: one entry per voxel block. It stores the block location, LOD occupancy masks, the detailed 4x4x4 shape mask, and the start index into the render data buffer.
+- `VoxelRenderData`: one entry per occupied voxel. It stores the packed material data, such as color, roughness, and specular intensity.
+
 As we mentioned before, we render all the blocks as billboards, and we do `Graphics.DrawMeshInstancedProcedural` as below:
 
 ```
+_blockDataBuffer.SetData(blockData);
+_voxelRenderDataBuffer.SetData(voxelRenderData);
+
 Graphics.DrawMeshInstancedProcedural(
     _quadMesh,
     0,
@@ -209,13 +218,19 @@ Graphics.DrawMeshInstancedProcedural(
 ```
 
 #### Vertex Shader
-In the vertex shader, we calculate the billboard and apply the optional reveal animation. The pseudo code is as below:
+The vertex shader only needs the per-block data. It uses the instance ID to read one `BlockRenderData` entry, decodes the block's location from `shapeLevelAndLocation`, and reconstructs the block bounds in world space.
+
+After the block bounds are known, the shader expands a simple quad around the block center using the camera's right and up vectors. This keeps the quad parallel to the screen and large enough to cover the projected voxel block. The quad itself is still flat, but the fragment shader will later reconstruct the actual voxel shape inside it.
+
+The simplified logic looks like this:
 
 ```
+StructuredBuffer<BlockRenderData> BlockDataBuffer;
+
 Function VertexShader(VertexInput input):
     // 1. Fetch base data for the current Voxel block
-    blockData = ReadBuffer(input.InstanceID)
-    blockBounds = CalculateBoundsAndCenter(blockData, gridOrigin, worldBlockSize)
+    blockData = BlockDataBuffer[input.InstanceID]
+    blockBounds = ReconstructBlockBounds(blockData.shapeLevelAndLocation)
 
     // 2. Handle reveal animation (e.g., emerging from the ground)
     progress = CalculateAnimationProgress(blockBounds.Center, effectCenter)
@@ -233,51 +248,74 @@ Function VertexShader(VertexInput input):
     screenClipPos = TransformToClipSpace(worldPos)
 
     // Pass necessary data to the Fragment Shader
-    Output screenClipPos, worldPos, blockBounds, input.InstanceID
+    Output screenClipPos, worldPos, blockBounds, input.InstanceID as BlockIndex
 ```
 
-Note that our implementation requires the quads to remain parallel to the screen at all times. To achieve this, we:
-
-1. Pass the camera orientation vectors (Right and Up) to the shader.
-2. Expand the quad vertices outward along these camera axes.
-
-This guarantees that the resulting billboards stay perfectly aligned with the view plane.
+The important point is that the vertex shader does not know about individual voxels. It only reconstructs the block position and creates a screen-facing area where the fragment shader can perform the real voxel test.
 
 #### Fragment Shader
-The fragment shader is more compute-intensive. First, we determine which LOD we are using. If rendering at the most detailed LOD, we traverse the 4x4x4 voxel grid using 3D DDA to find the first occupied voxel hit by the ray. For lower LODs, we test the ray against either the whole block or a coarser 2x2x2 grid, depending on the selected LOD level.
+The fragment shader is where the packed voxel data is actually interpreted, so it is more compute-intensive. For each pixel on the billboard, the shader creates a ray from the camera to the pixel position, then tests that ray against the voxel block.
 
-Next, we use the hit information to perform lighting and depth calculations. Furthermore, because the target geometry is merely a flat billboard, we must explicitly override the depth buffer with the true depth of the intersected voxel.
+The selected LOD controls how much of the block data is evaluated:
+
+- Level 0 uses the whole block bounding box.
+- Level 1 uses the 2x2x2 coarse occupancy stored in `shapeLevelAndLocation`.
+- Level 2 uses the full 4x4x4 occupancy stored in `shapeMaskLow` and `shapeMaskHigh`.
+
+Once the shader finds a hit, it needs to fetch the correct material data. Since the render data buffer only stores occupied voxels, the shader counts how many occupied voxels appear before the hit voxel in the 4x4x4 mask, then adds that offset to `renderStartIndex`.
+
+The simplified fragment shader flow looks like this:
 
 ```
+StructuredBuffer<BlockRenderData> BlockDataBuffer;
+StructuredBuffer<VoxelRenderData> VoxelRenderDataBuffer;
+
 Function FragmentShader(PixelInput input):
     // 1. Setup & Early Culling
     ray = CreateRayFromCamera(input.WorldPos)
-    blockData = GetBlockData(input.BlockIndex)
-    
-    if (BlockIsNotVisible(blockData)):
-        Discard()
+    blockData = BlockDataBuffer[input.BlockIndex]
+    blockBounds = ReconstructBlockBounds(blockData.shapeLevelAndLocation)
 
     // 2. Ray Traversal
     lodLevel = DetermineLOD(DistanceToCamera)
-    hitResult = TraceRayAgainstVoxels(ray, blockData, lodLevel)
+    hitResult = TraceBlock(
+        ray,
+        blockBounds,
+        blockData.shapeLevelAndLocation,
+        blockData.shapeMaskLow,
+        blockData.shapeMaskHigh,
+        lodLevel
+    )
     
     if (not hitResult.IsHit):
         Discard()
 
-    // 3. Depth Override
+    // 3. Get Hit Voxel Offset
+    occupiedVoxelOffset = CountOccupiedVoxelsBefore(
+        blockData.shapeMaskLow,
+        blockData.shapeMaskHigh,
+        hitResult.LocalVoxelIndex
+    )
+    voxelData = VoxelRenderDataBuffer[
+        blockData.renderStartIndex + occupiedVoxelOffset
+    ]
+
+    // 4. Depth Override
     Output.Depth = CalculateTrueDepth(hitResult.WorldPosition)
 
-    // 4. Material & Shading
-    material = DecodeVoxelMaterial(blockData, hitResult.LocalPosition)
+    // 5. Material & Shading
+    material = DecodeVoxelMaterial(voxelData.packedData)
     ambientOcclusion = CalculateVoxelAO(blockData, hitResult)
     
     finalColor = CalculateLighting(material, ambientOcclusion, SceneLights)
 
-    // 5. Output
+    // 6. Output
     Output finalColor, Output.Depth
 ```
 
-For the ray marching part, we leveraged the 3D DDA algorithm to efficiently traverse the voxel grid. The DDA algorithm calculates the intersection of a ray with a grid of cells. It does this by calculating the intersection of the ray with each cell in the grid, and then taking the minimum of all the intersections and step sizes along the ray until the ray exits the grid or hits a non-empty voxel. Please refer to [this link](https://voxel.wiki/wiki/raycasting/) for more details.
+Because the actual mesh is only a flat billboard, the shader must also override the depth buffer with the true depth of the intersected voxel.
+
+For the Level 2 traversal, I use the 3D DDA algorithm to efficiently walk through the 4x4x4 voxel grid. Instead of testing every voxel in the block, DDA advances from cell to cell along the ray and stops as soon as it finds the first occupied voxel or exits the block. Please refer to [this link](https://voxel.wiki/wiki/raycasting/) for more details.
 
 ## Results
 
