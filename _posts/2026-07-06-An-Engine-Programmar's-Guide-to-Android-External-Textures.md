@@ -11,18 +11,28 @@ By the end of this guide, you will understand the requirements for integrating l
 
 ## What are External Textures?
 
-When developing graphics applications on Android, you often need to ingest frames from a camera or a media decoder (video), apply custom processing, and render them to the screen. However, hardware components like the camera sensor or video decoder write their output into specialized, hardware-backed memory (typically in a YUV color format)(TODO: ref). This raw data is not easily accessible by standard application RAM, and the YUV format is not natively friendly to standard GPU rendering pipelines.
+### Problem Statement
 
-If you try to process this without an external texture, the CPU is forced to execute two expensive steps for every single frame:
+Before defining external textures, let's clarify the problem they solve.
 
-1. Copy the massive pixel data from hardware memory into standard RAM.
+A camera or video decoder frame is not usually born as a regular GPU `Texture2D`.
+A normal `Texture2D` usually means that the application owns a GPU texture object, knows its format, and can sample it with a regular `sampler2D`.
+
+Camera and video frames are different. They are produced by Android system components such as the camera HAL or hardware video decoder, and are usually written into hardware-backed buffers allocated by Android's graphics allocator. These buffers may use YUV formats, multi-plane layouts, vendor-private memory layouts, or tiling/compression schemes that the application should not interpret directly.
+
+When you want to ingest frames from a camera or a media decoder, apply custom processing, and render them to the screen. You need to convert a hardware buffer to a `Texture2D` so that we can manage it in the graphics pipeline. If we forced every frame into a regular `Texture2D`, the pipeline would look like this:
+
+1. Copy the massive pixel data from hardware memory into CPU-visible memory.
 2. Convert the data from YUV into a GPU-friendly RGB format.
+3. Upload to GPU texture as a Texture2D
 
-Executing this on the CPU every frame destroys rendering performance, drains the battery, and quickly overheats the device. This is exactly the bottleneck External Textures were introduced to solve.
+Executing this on the CPU every frame destroys rendering performance, drains the battery, and quickly overheats the device. This is the bottleneck External Textures were introduced to solve.
 
-### Benefits of External Textures
+### External Texture
 
-An External Texture creates a bridge that allows the GPU to map and read directly from the hardware buffer. This creates a zero-copy pipeline, bypassing the CPU entirely so no data needs to be moved. Even better, when your shader samples an external texture, the graphics hardware automatically handles the YUV-to-RGB color space conversion on the fly (TODO: ref). You get hardware-accelerated color conversion without writing complex decoding logic or incurring additional performance costs.
+An external texture is a way for rendering code to sample an image buffer that was produced outside the rendering API's normal texture allocation path. Instead of creating a regular texture, filling it from CPU memory, and then sampling it, the app asks Android to connect a producer such as `Camera` or `MediaCodec` to a consumer that the GPU can sample from. 
+
+By dealing with the hardwaire buffer directly, we no longer have to perform the additional copy, we can now have a zero-copy pipeline, bypassing the CPU entirely. Even better, when your shader samples an external texture, the graphics hardware automatically handles the YUV-to-RGB color space conversion on the fly (TODO: ref). You get hardware-accelerated color conversion without writing complex decoding logic or incurring additional performance costs.
 
 ### The Producer-Consumer architecture in Android
 
@@ -108,7 +118,7 @@ fun onDrawFrame() {
 }
 ```
 
-Because you now have a standard OpenGL texture ID, you can easily apply post-processing effects and custom shaders to the external texture as below:
+Because you now have a GL texture object that points to the external image stream, you can sample it in your shader and apply post-processing effects:
 
 ```kotlin
 // Fragment Shader
