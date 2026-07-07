@@ -64,7 +64,7 @@ In Android, when you want to process camera frames, you generally have to choose
 - SurfaceTexture (for GPU)
 - ImageReader (for CPU)
 
-#### SurfaceTexture
+## SurfaceTexture
 
 `SurfaceTexture` is the consumer you want for rendering. It provides a `Surface` that is backed directly by an OpenGL ES texture, which is the concrete implementation of the "External Texture" concept we discussed earlier. 
 
@@ -134,7 +134,7 @@ And, as we mentioned earlier, this process is entirely zero-copy, and the hardwa
 
 However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL_TEXTURE_EXTERNAL_OES` OpenGL extension. What if our engine runs on Vulkan? Or what if we don't need to apply any extra shader effects to these frames at all?
   
-#### ImageReader
+## ImageReader
 
 Unlike `SurfaceTexture`, we don't need to generate GL ID when using `ImageReader`. Instead, we can access the image byte buffer with CPU directly, and we can also control how many images we want to hold in the queue at the same time.
 
@@ -168,7 +168,7 @@ imageReader.setOnImageAvailableListener({ reader ->
 ```
 
 When you want to save the camera data as a bitmap to the disk, or something you don't need GPU engaged, it is fairly useful. But here I want to emphasize another case: rendering with Vulkan.
-As we mentioned before, there is no `SurfaceTexture` extension in Vulkan, so we need to leverage `ImageReader`. Then you might be worried about the performance, because `ImageReader` would stream the data to CPU, and if we want to render with Vulkan, that means we need to upload it onto GPU again, and lose the zero-copy benefit! However, the good news is, we don't have to do so.
+As we mentioned before, there is no `SurfaceTexture` extension in Vulkan, so we need to leverage `ImageReader`. Then you might be worried about the performance, because `ImageReader` would stream the data to CPU, and if we want to render with Vulkan, that means we need to upload it onto GPU again, and lose the zero-copy benefit! However, the good news is, we don't have to do so (if you have API version 24+ and `VK_ANDROID_external_memory_android_hardware_buffer` entension).
 
 Back to the creation of `ImageReader`, we can let Android know we are gonna sample the texture with GPU:
 
@@ -204,33 +204,70 @@ imageReader.setOnImageAvailableListener({ reader ->
 }, backgroundHandler)
 ```
 
+On the native engine side, you may do something like:
 
-### Benefits of External Textures?
+```C++
+#include <android/hardware_buffer_jni.h>
+#include <vulkan/vulkan.h>
 
-// Zero-copy, hardware YUV-to-RGB conversion
+extern "C" JNIEXPORT void JNICALL
+Java_com_your_app_NativeEngine_drawWithHardwareBuffer(JNIEnv *env, jobject instance, jobject jHardwareBuffer) {
+    
+    // 1. Convert the Java HardwareBuffer into a native AHardwareBuffer pointer
+    AHardwareBuffer* hardwareBuffer = AHardwareBuffer_fromHardwareBuffer(env, jHardwareBuffer);
+    
+    if (!hardwareBuffer) return;
 
-// what are the benefits of external texture mechanism?
+    // 2. Setup Vulkan structures to import the hardware buffer memory.
+    // (Ensure your Vulkan instance enabled VK_ANDROID_external_memory_android_hardware_buffer)
+    VkImportAndroidHardwareBufferInfoANDROID importInfo = {};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+    importInfo.pNext = nullptr;
+    importInfo.buffer = hardwareBuffer;
+    
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.pNext = &importInfo;
+    
+    // Note: In a real engine, you must use vkGetAndroidHardwareBufferPropertiesANDROID 
+    // to query the correct memory type index and allocation size before allocating.
+    
+    // 3. Allocate Vulkan memory backed directly by the camera's hardware buffer
+    vkAllocateMemory(device, &allocInfo, nullptr, &deviceMemory);
+    
+    // 4. Bind this memory to a VkImage, create a VkImageView, and sample it.
+    // ... standard Vulkan rendering logic ...
+}
+```
 
-## Integration to the Engine
+After that, you can enjoy your zero-copy image and zero-cost YUV to RGB conversion in the shader with no additional modification!
 
-// EGL Contexts and updateTexImage()
+```
+// Vulkan Fragment Shader (GLSL)
+#version 450
 
+// Notice: No special extensions required!
+// Just a standard 2D sampler.
+layout(binding = 0) uniform sampler2D uCameraTexture;
 
-// opengles: surfaceview, vulkan: imagereader
+layout(location = 0) in vec2 vTexCoord;
+layout(location = 0) out vec4 outColor;
 
-SurfaceTexture is fundamentally tied to OpenGL ES
+void main() {
+    // The hardware still handles the YUV -> RGB conversion for you,
+    // but the shader just treats it like a normal RGBA texture fetch.
+    outColor = texture(uCameraTexture, vTexCoord);
+}
+```
 
-## The Shader Implementation
+## Integration to the Engine Examples
 
-// The OES extension, samplerExternalOES
+### Filament
 
-// Mention: SurfaceTexture.getTransformMatrix()
+// TODO
 
-## Some Engine Integration Examples
-
-// Filament
-// Unity
-// Unreal?
+// Unity?
+// Godot?
 
 
 ## References
