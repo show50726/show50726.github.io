@@ -70,13 +70,11 @@ Note: You can also do entirely in C++, but for this article, I'm going to assume
 
 Notice what is happening in the code above: the Camera API only asks for a `Surface`. A `Surface` in Android is essentially a handle to a buffer queue. The Camera (the Producer) does not know, nor does it care, where those pixels are actually going. It just pushes frames into the Surface.
 
-In Android, when you want to process camera frames, you generally have to choose between two main types of Consumers to create that `Surface`: an `ImageReader` or a `SurfaceTexture`, each serving a fundamentally different pipeline:
-- SurfaceTexture (for GPU)
-- ImageReader (for CPU)
+Let's talk about the most common Consumer first: `SurfaceTexture`.
 
 ## SurfaceTexture
 
-`SurfaceTexture` is the consumer you want for rendering. It provides a `Surface` that is backed directly by an OpenGL ES texture, which is the concrete implementation of the "External Texture" concept we discussed earlier. 
+`SurfaceTexture` provides a `Surface` that is backed directly by an OpenGL ES texture, which is the concrete implementation of the "External Texture" concept we discussed earlier. 
 
 Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you can finally wrap in a standard Android `Surface`.
 
@@ -142,11 +140,13 @@ void main() {
 ```
 And, as we mentioned earlier, this process is entirely zero-copy, and the hardware handles the YUV-to-RGB conversion automatically during the texture sampling phase.
 
-However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL_TEXTURE_EXTERNAL_OES` OpenGL extension. What if our engine runs on Vulkan? Or what if we don't need to apply any extra shader effects to these frames at all?
+However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL_TEXTURE_EXTERNAL_OES` OpenGL extension. What if our engine runs on Vulkan?
   
 ## ImageReader
 
-Unlike `SurfaceTexture`, we don't need to generate GL ID when using `ImageReader`. Instead, we can access the image byte buffer with CPU directly, and we can also control how many images we want to hold in the queue at the same time.
+In Vulkan, there is no corresponding extension for `SurfaceTexture`, so we can only go through another path: `ImageReader`. `ImageReader` allows the users to access to the hardware buffer directly. Then we can use the buffer data to create a `VkImage` accordingly. (Note: You need `VK_ANDROID_external_memory_android_hardware_buffer` for this)
+
+First we create a `ImageReader` on the kotlin side:
 
 ```kotlin
 // 1. Create an ImageReader that requests hardware-backed buffers (API 26+)
@@ -156,6 +156,7 @@ val imageReader = ImageReader.newInstance(
     width, height, 
     ImageFormat.PRIVATE, 
     2, // Max images in the queue
+    HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE // Tell Android this will be sampled by the GPU
 )
 
 // 2. Connect the Producer (Camera) to our new Consumer
@@ -170,43 +171,14 @@ imageReader.setOnImageAvailableListener({ reader ->
     // Grab the latest frame
     val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
     
-    // Do something...
-
-    // Close the image at the end.
-    image.close()
-}, backgroundHandler)
-```
-
-When you want to save the camera data as a bitmap to the disk, or something you don't need GPU engaged, it is fairly useful. But here I want to emphasize another case: rendering with Vulkan.
-As we mentioned before, there is no `SurfaceTexture` extension in Vulkan, so we need to leverage `ImageReader`. Then you might be worried about the performance, because `ImageReader` would stream the data to CPU, and if we want to render with Vulkan, that means we need to upload it onto GPU again, and lose the zero-copy benefit! However, the good news is, we don't have to do so (if you have API version 24+ and `VK_ANDROID_external_memory_android_hardware_buffer` entension).
-
-Back to the creation of `ImageReader`, we can let Android know we are gonna sample the texture with GPU:
-
-```kotlin
-val imageReader = ImageReader.newInstance(
-    width, height, 
-    ImageFormat.PRIVATE, 
-    2, // Max images in the queue
-    HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE // <-- !!New: Tell Android this will be sampled by the GPU
-)
-
-...(same as above)
-```
-
-And when registerign the listener, we can get the hardware buffer after we acquire the new image:
-```kotlin
-imageReader.setOnImageAvailableListener({ reader ->
-    // Grab the latest frame
-    val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-    
-    // <--!!New: Extract the AHardwareBuffer (available since API 26)
+    // Extract the AHardwareBuffer (available since API 26)
     val hardwareBuffer = image.hardwareBuffer
     
     if (hardwareBuffer != null) {
-        // <--!!New: Pass the hardware buffer across the JNI bridge to your C++ engine
+        // Pass the hardware buffer across the JNI bridge to your C++ engine
         nativeEngine.drawWithHardwareBuffer(hardwareBuffer)
         
-        // <--!!New: Close the hardware buffer at the end.
+        // Close the hardware buffer at the end.
         hardwareBuffer.close()
     }
     // Close the image at the end.
