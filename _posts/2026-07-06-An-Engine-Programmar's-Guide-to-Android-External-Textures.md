@@ -1,5 +1,5 @@
 ---
-title: An Engine Programmer’s Guide to Android External Textures
+title: An Engine Programmer's Guide to Android External Textures
 date: 2026-05-30 00:53:35 +0800
 categories: [Graphics]
 tags: [Android, Graphics]
@@ -20,7 +20,9 @@ A normal `Texture2D` usually means that the application owns a GPU texture objec
 
 Camera and video frames are different. They are produced by Android system components such as the camera HAL or hardware video decoder, and are usually written into hardware-backed buffers allocated by Android's graphics allocator. These buffers may use YUV formats, multi-plane layouts, vendor-private memory layouts, or tiling/compression schemes that the application should not interpret directly.
 
-When you want to ingest frames from a camera or a media decoder, apply custom processing, and render them to the screen. You need to convert a hardware buffer to a `Texture2D` so that we can manage it in the graphics pipeline. If we forced every frame into a regular `Texture2D`, the pipeline would look like this:
+When you want to ingest frames from a camera or media decoder, apply custom processing, and render them to the screen, the naive approach is to turn each frame into a regular engine texture. In many engines, that means converting the producer-owned hardware buffer into something that looks like a normal `Texture2D`.
+
+If we forced every frame into a regular `Texture2D`, the pipeline would look like this:
 
 1. Copy the massive pixel data from hardware memory into CPU-visible memory.
 2. Convert the data from YUV into a GPU-friendly RGB format.
@@ -32,7 +34,9 @@ Executing this on the CPU every frame destroys rendering performance, drains the
 
 An external texture is a way for rendering code to sample an image buffer that was produced outside the rendering API's normal texture allocation path. Instead of creating a regular texture, filling it from CPU memory, and then sampling it, the app asks Android to connect a producer such as `Camera` or `MediaCodec` to a consumer that the GPU can sample from. 
 
-By dealing with the hardwaire buffer directly, we no longer have to perform the additional copy, we can now have a zero-copy pipeline, bypassing the CPU entirely. Even better, when your shader samples an external texture, the graphics hardware automatically handles the YUV-to-RGB color space conversion on the fly (TODO: ref). You get hardware-accelerated color conversion without writing complex decoding logic or incurring additional performance costs.
+By sampling the hardware-backed buffer through the graphics stack, we avoid the expensive app-level CPU copy, CPU-side YUV-to-RGB conversion, and texture upload loop. In the common camera/video rendering path, this gives us the zero-copy behavior we want from the engine's point of view: the frame stays in graphics-friendly memory and the shader samples it through a backend-specific external image path.
+
+For formats such as camera YUV buffers, the graphics stack can also perform the required format conversion during sampling, so the shader can work with RGB-like color values instead of manually decoding YUV planes.
 
 ### The Producer-Consumer architecture in Android
 
@@ -65,18 +69,32 @@ cameraDevice.createCaptureSession(
 )
 ```
 
-Note: You can also do entirely in C++, but for this article, I'm going to assume we have a Java/Kotlin app with a native C++ rendering engine library under the hood to align with Filament :P
+Note: You can also do entirely in C++, but for this article, I'm going to assume we have a Java/Kotlin app with a native C++ rendering engine library under the hood.
 
 
 Notice what is happening in the code above: the Camera API only asks for a `Surface`. A `Surface` in Android is essentially a handle to a buffer queue. The Camera (the Producer) does not know, nor does it care, where those pixels are actually going. It just pushes frames into the Surface.
+
+The flow is roughly like this:
+
+```
+Camera / MediaCodec
+        |
+        v
+      Surface
+        |
+        v
+   BufferQueue
+        |
+        +--> SurfaceTexture -> GL_TEXTURE_EXTERNAL_OES -> OpenGL ES
+        |
+        +--> ImageReader    -> HardwareBuffer          -> Vulkan/OpenGLES import
+```
 
 Let's talk about the most common Consumer first: `SurfaceTexture`.
 
 ## SurfaceTexture
 
-`SurfaceTexture` provides a `Surface` that is backed directly by an OpenGL ES texture, which is the concrete implementation of the "External Texture" concept we discussed earlier. 
-
-Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you can finally wrap in a standard Android `Surface`.
+`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread. Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you can finally wrap in a standard Android `Surface`.
 
 ```kotlin
 // 1. Generate a standard OpenGL texture ID
@@ -138,18 +156,21 @@ void main() {
     gl_FragColor = cameraColor; 
 }
 ```
-And, as we mentioned earlier, this process is entirely zero-copy, and the hardware handles the YUV-to-RGB conversion automatically during the texture sampling phase.
+From the application's point of view, this avoids the expensive CPU readback and re-upload path. The engine samples the producer's buffer through `samplerExternalOES` instead of copying the frame into a regular `GL_TEXTURE_2D`.
 
 However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL_TEXTURE_EXTERNAL_OES` OpenGL extension. What if our engine runs on Vulkan?
-  
+
 ## ImageReader
 
-In Vulkan, there is no corresponding extension for `SurfaceTexture`, so we can only go through another path: `ImageReader`. `ImageReader` allows the users to access to the hardware buffer directly. Then we can use the buffer data to create a `VkImage` accordingly. (Note: You need `VK_ANDROID_external_memory_android_hardware_buffer` for this)
+The GLES path works because `SurfaceTexture` knows how to expose queued Android buffers as `GL_TEXTURE_EXTERNAL_OES`. Vulkan does not use `SurfaceTexture` this way. For a Vulkan backend, a more suitable path is to acquire Android `HardwareBuffer` objects and import them into Vulkan with the `VK_ANDROID_external_memory_android_hardware_buffer` extension.
 
-First we create a `ImageReader` on the kotlin side:
+A practical Android-side producer/consumer setup for this is `ImageReader` configured with `ImageFormat.PRIVATE` and GPU sampling usage.
+
+First we create an `ImageReader` on the Kotlin side:
 
 ```kotlin
-// 1. Create an ImageReader that requests hardware-backed buffers (API 26+)
+// 1. Create an ImageReader that requests hardware-backed buffers.
+// The overload with usage flags requires API 29+.
 // ImageFormat.PRIVATE allows the Android graphics allocator (Gralloc) to choose 
 // the optimal hardware format for the GPU.
 val imageReader = ImageReader.newInstance(
@@ -163,7 +184,7 @@ val imageReader = ImageReader.newInstance(
 captureRequestBuilder.addTarget(imageReader.surface)
 ```
 
-To get the latest data, we will set the listen to call `reader.acquireLatestImage()` when available:
+To get the latest data, set a listener and call `reader.acquireLatestImage()` when a frame is available:
 
 ```kotlin
 // Process frames as they arrive
@@ -171,7 +192,7 @@ imageReader.setOnImageAvailableListener({ reader ->
     // Grab the latest frame
     val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
     
-    // Extract the AHardwareBuffer (available since API 26)
+    // Extract the HardwareBuffer (API 28+).
     val hardwareBuffer = image.hardwareBuffer
     
     if (hardwareBuffer != null) {
@@ -180,64 +201,114 @@ imageReader.setOnImageAvailableListener({ reader ->
         
         // Close the hardware buffer at the end.
         hardwareBuffer.close()
+
+        // Important: The native side must not keep using the Java `HardwareBuffer` object after the Java side closes it
+        // unless it has acquired or imported the underlying native resource correctly.
     }
     // Close the image at the end.
     image.close()
 }, backgroundHandler)
 ```
 
-On the native engine side, you may do something like:
+Note: The API levels are easy to mix up:
 
-```C++
+1. `AHardwareBuffer` exists on the native side from API 26.
+2. `Image.hardwareBuffer` is available from API 28.
+3. The `ImageReader.newInstance(..., usage)` overload used below is available from API 29.
+4. Vulkan import requires `VK_ANDROID_external_memory_android_hardware_buffer`.
+
+On the native engine side, the Vulkan flow is roughly:
+
+1. Convert the Java `HardwareBuffer` into an `AHardwareBuffer`.
+2. Query its Vulkan properties with `vkGetAndroidHardwareBufferPropertiesANDROID`.
+3. Create a compatible `VkImage`.
+4. Import the Android hardware buffer memory with `VkImportAndroidHardwareBufferInfoANDROID`.
+5. Bind the imported memory to the `VkImage`.
+6. Create the image view and sampler.
+7. If the buffer uses an external or YUV format, configure the required external format and sampler YCbCr conversion path.
+8. Synchronize producer and consumer access before sampling.
+
+In pseudo-code, the native side looks like this:
+
+```cpp
 #include <android/hardware_buffer_jni.h>
 #include <vulkan/vulkan.h>
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_your_app_NativeEngine_drawWithHardwareBuffer(JNIEnv *env, jobject instance, jobject jHardwareBuffer) {
-    
-    // 1. Convert the Java HardwareBuffer into a native AHardwareBuffer pointer
-    AHardwareBuffer* hardwareBuffer = AHardwareBuffer_fromHardwareBuffer(env, jHardwareBuffer);
-    
-    if (!hardwareBuffer) return;
+void importHardwareBufferToVulkan(JNIEnv* env, jobject jHardwareBuffer) {
+    AHardwareBuffer* hardwareBuffer =
+            AHardwareBuffer_fromHardwareBuffer(env, jHardwareBuffer);
+    if (!hardwareBuffer) {
+        return;
+    }
 
-    // 2. Setup Vulkan structures to import the hardware buffer memory.
-    // (Ensure your Vulkan instance enabled VK_ANDROID_external_memory_android_hardware_buffer)
-    VkImportAndroidHardwareBufferInfoANDROID importInfo = {};
-    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
-    importInfo.pNext = nullptr;
-    importInfo.buffer = hardwareBuffer;
-    
-    VkMemoryAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.pNext = &importInfo;
-    
-    // Note: In a real engine, you must use vkGetAndroidHardwareBufferPropertiesANDROID 
-    // to query the correct memory type index and allocation size before allocating.
-    
-    // 3. Allocate Vulkan memory backed directly by the camera's hardware buffer
-    vkAllocateMemory(device, &allocInfo, nullptr, &deviceMemory);
-    
-    // 4. Bind this memory to a VkImage, create a VkImageView, and sample it.
-    // ... standard Vulkan rendering logic ...
+    // 1. Query the Vulkan-side properties of this Android hardware buffer.
+    VkAndroidHardwareBufferPropertiesANDROID ahbProps = {
+        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+    };
+
+    vkGetAndroidHardwareBufferPropertiesANDROID(
+            device,
+            hardwareBuffer,
+            &ahbProps);
+
+    // 2. Create a VkImage compatible with the hardware buffer.
+    // In real code, image format / external format / usage must match ahbProps.
+    VkImageCreateInfo imageInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = { width, height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+    };
+
+    VkImage image = VK_NULL_HANDLE;
+    vkCreateImage(device, &imageInfo, nullptr, &image);
+
+    // 3. Import the AHardwareBuffer as Vulkan device memory.
+    VkImportAndroidHardwareBufferInfoANDROID importInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+        .buffer = hardwareBuffer,
+    };
+
+    VkMemoryDedicatedAllocateInfo dedicatedInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .pNext = &importInfo,
+        .image = image,
+    };
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedicatedInfo,
+        .allocationSize = ahbProps.allocationSize,
+        .memoryTypeIndex = findCompatibleMemoryType(ahbProps.memoryTypeBits),
+    };
+
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    vkAllocateMemory(device, &allocInfo, nullptr, &memory);
+    vkBindImageMemory(device, image, memory, 0);
+
+    // 4. Create image view, sampler, descriptor, and any required
+    // sampler YCbCr conversion before sampling from the shader.
 }
 ```
 
-After that, you can enjoy your zero-copy image and zero-cost YUV to RGB conversion in the shader with no additional modification!
+The important point is that the engine cannot assume the buffer is a normal RGBA image. The format and memory requirements must come from the Android hardware buffer properties.
 
-```
+Once the image, view, sampler, descriptor, and possible YCbCr conversion are set up correctly, the shader may look simple:
+
+```glsl
 // Vulkan Fragment Shader (GLSL)
 #version 450
 
-// Notice: No special extensions required!
-// Just a standard 2D sampler.
 layout(binding = 0) uniform sampler2D uCameraTexture;
 
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // The hardware still handles the YUV -> RGB conversion for you,
-    // but the shader just treats it like a normal RGBA texture fetch.
     outColor = texture(uCameraTexture, vTexCoord);
 }
 ```
