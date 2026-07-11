@@ -5,7 +5,7 @@ categories: [Graphics]
 tags: [Android, Graphics]
 ---
 
-If you're an engine progrmmar (or you're working with a game/rendering engine) and the engine supports Android platform, you have likely heard of "External Textures." But what exactly is it? and how does it work under the hood? But what exactly are they, and how do they work under the hood? In this article, I will walk you through the core mechanics of external textures on Android.
+If you're an engine progrmmar (or you're working with a game/rendering engine) and the engine supports Android platform, you have likely heard of "External Textures." But what exactly are they, and how do they work under the hood? In this article, I will walk you through the core mechanics of external textures on Android.
 
 By the end of this guide, you will understand the requirements for integrating live camera and video streams into an Android-supported engine, and how to properly interface with Android's native graphics components.
 
@@ -15,8 +15,7 @@ By the end of this guide, you will understand the requirements for integrating l
 
 Before defining external textures, let's clarify the problem they solve.
 
-A camera or video decoder frame is not usually born as a regular GPU `Texture2D`.
-A normal `Texture2D` usually means that the application owns a GPU texture object, knows its format, and can sample it with a regular `sampler2D`.
+A camera or video decoder frame is not usually born as a regular GPU `Texture2D`. A normal `Texture2D` usually means that the application owns a GPU texture object, knows its format, and can sample it with a regular `sampler2D`.
 
 Camera and video frames are different. They are produced by Android system components such as the camera HAL or hardware video decoder, and are usually written into hardware-backed buffers allocated by Android's graphics allocator. These buffers may use YUV formats, multi-plane layouts, vendor-private memory layouts, or tiling/compression schemes that the application should not interpret directly.
 
@@ -94,7 +93,7 @@ Let's talk about the most common Consumer first: `SurfaceTexture`.
 
 ## SurfaceTexture
 
-`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread. Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you can finally wrap in a standard Android `Surface`.
+`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread. Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you wrap in an Android `Surface`.
 
 ```kotlin
 // 1. Generate a standard OpenGL texture ID
@@ -163,6 +162,8 @@ However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL
 ## ImageReader
 
 The GLES path works because `SurfaceTexture` knows how to expose queued Android buffers as `GL_TEXTURE_EXTERNAL_OES`. Vulkan does not use `SurfaceTexture` this way. For a Vulkan backend, a more suitable path is to acquire Android `HardwareBuffer` objects and import them into Vulkan with the `VK_ANDROID_external_memory_android_hardware_buffer` extension.
+
+(Note: You may also use `ImageReader` in GLES, but we emphasize Vulkan here because Vulkan can't go through `SurfaceTexture` path and could only use `ImageReader`)
 
 A practical Android-side producer/consumer setup for this is `ImageReader` configured with `ImageFormat.PRIVATE` and GPU sampling usage.
 
@@ -317,16 +318,19 @@ void main() {
 
 ### Filament
 
-// TODO
+In Filament, there are two ways you can import external textures. The first one is the ordinary `Texture` class. You create a `Texture` object but specify it is an `external()` resource. After that, you must call `setExternalImage()` to give a handle of the external image, and also call it whenever there is an update to the image.
 
-// Unity?
+The second one is a `Stream`, where the filament `Texture` automatically updates its content from the external source, so that you don't have to update the image by yourselves.
+
+### Same as 
+
+https://docs.unity3d.com/ScriptReference/Texture2D.CreateExternalTexture.html
+
 // Godot?
 
 
 ## References
 
-[1] https://source.android.com/docs/core/graphics/arch-bq-gralloc
-
-https://dev.epicgames.com/community/learning/knowledge-base/KKKp/unreal-engine-how-to-create-external-textures-on-android
+https://source.android.com/docs/core/graphics/arch-bq-gralloc
 
 https://source.android.com/docs/core/graphics/arch-st
