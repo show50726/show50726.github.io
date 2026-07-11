@@ -5,9 +5,9 @@ categories: [Graphics]
 tags: [Android, Graphics]
 ---
 
-If you're an engine programmer (or you're working with a game/rendering engine) and the engine supports Android platform, you have likely heard of "External Textures." But what exactly are they, and how do they work under the hood? In this article, I will walk you through the core mechanics of external textures on Android.
+If you're an engine programmer working on Android support for a game or rendering engine, you have probably run into "external textures" when dealing with camera preview, video playback, or other producer-backed image streams. They look like textures at the material or shader level, but under the hood they are not regular `Texture2D` resources owned and filled by the engine.
 
-By the end of this guide, you will understand the requirements for integrating live camera and video streams into an Android-supported engine, and how to properly interface with Android's native graphics components.
+This article walks through what Android external textures are, why camera and video frames need a different path from normal textures, how `SurfaceTexture` and `ImageReader` fit into Android's producer-consumer model, and how modern rendering/game engines usually wrap these platform-specific objects behind engine-level texture abstractions.
 
 ## What are External Textures?
 
