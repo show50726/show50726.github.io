@@ -17,7 +17,7 @@ Before defining external textures, let's clarify the problem they solve.
 
 A camera or video decoder frame is not usually born as a regular GPU `Texture2D`. A normal `Texture2D` usually means that the application owns a GPU texture object, knows its format, and can sample it with a regular `sampler2D`.
 
-Camera and video frames are different. They are produced by Android system components such as the camera HAL or hardware video decoder, and are usually written into hardware-backed buffers allocated by Android's graphics allocator. These buffers may use YUV formats, multi-plane layouts, vendor-private memory layouts, or tiling/compression schemes that the application should not interpret directly.
+Camera and video frames are different. They are produced by Android system components such as the camera HAL or hardware video decoder, and are usually written into hardware-backed buffers allocated by Android's graphics allocator [[1]](#ref-1). These buffers may use YUV formats, multi-plane layouts, vendor-private memory layouts, or tiling/compression schemes that the application should not interpret directly.
 
 When you want to ingest frames from a camera or media decoder, apply custom processing, and render them to the screen, the naive approach is to turn each frame into a regular engine texture. In many engines, that means converting the producer-owned hardware buffer into something that looks like a normal `Texture2D`.
 
@@ -93,7 +93,7 @@ Let's talk about the most common Consumer first: `SurfaceTexture`.
 
 ## SurfaceTexture
 
-`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread. Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you wrap in an Android `Surface`.
+`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread [[2]](#ref-2). Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you wrap in an Android `Surface`.
 
 ```kotlin
 // 1. Generate a standard OpenGL texture ID
@@ -161,11 +161,11 @@ However, you might notice a catch: `SurfaceTexture` explicitly relies on the `GL
 
 ## ImageReader
 
-The GLES path works because `SurfaceTexture` knows how to expose queued Android buffers as `GL_TEXTURE_EXTERNAL_OES`. Vulkan does not use `SurfaceTexture` this way. For a Vulkan backend, a more suitable path is to acquire Android `HardwareBuffer` objects and import them into Vulkan with the `VK_ANDROID_external_memory_android_hardware_buffer` extension.
+The GLES path works because `SurfaceTexture` knows how to expose queued Android buffers as `GL_TEXTURE_EXTERNAL_OES`. Vulkan does not use `SurfaceTexture` this way. For a Vulkan backend, a more suitable path is to acquire Android `HardwareBuffer` objects and import them into Vulkan with the `VK_ANDROID_external_memory_android_hardware_buffer` extension [[8]](#ref-8).
 
 (Note: You may also use `ImageReader` with GLES. This guide emphasizes Vulkan here because Vulkan does not have an equivalent of the GLES `SurfaceTexture` / `GL_TEXTURE_EXTERNAL_OES` path, and `ImageReader` + `HardwareBuffer` is a practical way to acquire Android-produced buffers for Vulkan import.)
 
-A practical Android-side producer/consumer setup for this is `ImageReader` configured with `ImageFormat.PRIVATE` and GPU sampling usage.
+A practical Android-side producer/consumer setup for this is `ImageReader`[[3]](#ref-3) configured with `ImageFormat.PRIVATE`[[6]](#ref-6) and GPU sampling usage [[5]](#ref-5).
 
 First we create an `ImageReader` on the Kotlin side:
 
@@ -213,12 +213,12 @@ imageReader.setOnImageAvailableListener({ reader ->
 
 Note: The API levels are easy to mix up:
 
-1. `AHardwareBuffer` exists on the native side from API 26.
-2. `Image.hardwareBuffer` is available from API 28.
-3. The `ImageReader.newInstance(..., usage)` overload used below is available from API 29.
-4. Vulkan import requires `VK_ANDROID_external_memory_android_hardware_buffer`.
+1. `AHardwareBuffer` exists on the native side from API 26 [[7]](#ref-7).
+2. `Image.hardwareBuffer` is available from API 28 [[4]](#ref-4).
+3. The `ImageReader.newInstance(..., usage)` overload used below is available from API 29 [[3]](#ref-3).
+4. Vulkan import requires `VK_ANDROID_external_memory_android_hardware_buffer` [[8]](#ref-8).
 
-On the native engine side, the Vulkan flow is roughly:
+On the native engine side, the Vulkan flow is roughly [[8]](#ref-8):
 
 1. Convert the Java `HardwareBuffer` into an `AHardwareBuffer`.
 2. Query its Vulkan properties with `vkGetAndroidHardwareBufferPropertiesANDROID`.
@@ -368,7 +368,7 @@ The main design question for an engine is not just "how do I import the Android 
 
 ### Filament
 
-Filament exposes Android external images through two related but different abstractions: `Texture` and `Stream`.
+Filament exposes Android external images through two related but different abstractions: `Texture` [[9]](#ref-9) and `Stream`[[10]](#ref-10).
 
 #### External Texture
 
@@ -420,7 +420,7 @@ The key difference is the update model. `setExternalImage()` says "bind this ext
 
 ### Unreal Engine
 
-Unreal uses a registry-style abstraction. External textures are registered with a GUID, and the material system can later resolve that GUID into the actual RHI texture and sampler.
+Unreal uses a registry-style abstraction. External textures are registered with a GUID, and the material system can later resolve that GUID into the actual RHI texture and sampler [[11]](#ref-11).
 
 Conceptually:
 
@@ -441,7 +441,7 @@ This is a useful engine design pattern because it separates the material-facing 
 
 ### Unity
 
-Unity exposes a thinner wrapper. `Texture2D.CreateExternalTexture()` creates a Unity `Texture2D` object from an externally created native texture object. The native object differs according to the platform.
+Unity exposes a thinner wrapper. `Texture2D.CreateExternalTexture()` creates a Unity `Texture2D` object from an externally created native texture object. The native object differs according to the platform [[12]](#ref-12).
 
 Conceptually:
 
@@ -458,7 +458,7 @@ Texture2D.CreateExternalTexture()
 Unity material / renderer
 ```
 
-This means Unity's engine-facing object is still a `Texture2D`, but the actual producer, Android buffer import, synchronization, and lifetime management are typically handled by native plugin code. If the underlying native texture changes, `Texture2D.UpdateExternalTexture()` can retarget the Unity texture wrapper to another native texture object.
+This means Unity's engine-facing object is still a `Texture2D`, but the actual producer, Android buffer import, synchronization, and lifetime management are typically handled by native plugin code. If the underlying native texture changes, `Texture2D.UpdateExternalTexture()` can retarget the Unity texture wrapper to another native texture object [[13]](#ref-13).
 
 ### Comparison
 
@@ -466,7 +466,7 @@ This means Unity's engine-facing object is still a `Texture2D`, but the actual p
 | --- | --- | --- | --- |
 | Filament | `Texture::external()` + `setExternalImage()`, or `Stream` + `setExternalStream()` + `setAcquiredImage()` | Manual image binding, or acquired-image stream updates | Separates single external image from streaming external source |
 | Unreal Engine | `FExternalTextureRegistry` | Register / update texture by GUID | Material resolves external texture through a registry |
-| Unity | `Texture2D.CreateExternalTexture()` / `UpdateExternalTexture()` | Native plugin owns the handle, Unity wraps it | External native texture appears as a Unity `Texture2D` |
+| Unity | `Texture2D.CreateExternalTexture()` / `UpdateExternalTexture()`  | Native plugin owns the handle, Unity wraps it | External native texture appears as a Unity `Texture2D` |
 
 Across these engines, the shared lesson is that Android external textures usually need two layers of abstraction:
 
@@ -478,11 +478,28 @@ This separation keeps Android-specific lifetime, synchronization, and format han
 
 ## References
 
-https://source.android.com/docs/core/graphics/arch-bq-gralloc
-https://source.android.com/docs/core/graphics/arch-st
-https://docs.vulkan.org/refpages/latest/refpages/source/VK_ANDROID_external_memory_android_hardware_buffer.html
-https://github.com/google/filament/tree/main/filament/include/filament/Texture.h
-https://github.com/google/filament/tree/main/filament/include/filament/Stream.h
-https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/FExternalTextureRegistry
-https://docs.unity3d.com/ScriptReference/Texture2D.CreateExternalTexture.html
-https://docs.unity3d.com/ScriptReference/Texture2D.UpdateExternalTexture.html
+<span id="ref-1">[1]</span> [BufferQueue and Gralloc](https://source.android.com/docs/core/graphics/arch-bq-gralloc)
+
+<span id="ref-2">[2]</span> [SurfaceTexture](https://source.android.com/docs/core/graphics/arch-st)
+
+<span id="ref-3">[3]</span> [ImageReader](https://developer.android.com/reference/android/media/ImageReader)
+
+<span id="ref-4">[4]</span> [Image.getHardwareBuffer()](https://developer.android.com/reference/android/media/Image#getHardwareBuffer())
+
+<span id="ref-5">[5]</span> [ImageFormat.PRIVATE](https://developer.android.com/reference/android/graphics/ImageFormat#PRIVATE)
+
+<span id="ref-6">[6]</span> [HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE](https://developer.android.com/reference/android/hardware/HardwareBuffer#USAGE_GPU_SAMPLED_IMAGE)
+
+<span id="ref-7">[7]</span> [AHardwareBuffer](https://developer.android.com/ndk/reference/group/a-hardware-buffer)
+
+<span id="ref-8">[8]</span> [VK_ANDROID_external_memory_android_hardware_buffer](https://docs.vulkan.org/refpages/latest/refpages/source/VK_ANDROID_external_memory_android_hardware_buffer.html)
+
+<span id="ref-9">[9]</span> [Filament Texture.h](https://github.com/google/filament/tree/main/filament/include/filament/Texture.h)
+
+<span id="ref-10">[10]</span> [Filament Stream.h](https://github.com/google/filament/tree/main/filament/include/filament/Stream.h)
+
+<span id="ref-11">[11]</span> [Unreal Engine FExternalTextureRegistry](https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/FExternalTextureRegistry)
+
+<span id="ref-12">[12]</span> [Unity Texture2D.CreateExternalTexture](https://docs.unity3d.com/ScriptReference/Texture2D.CreateExternalTexture.html)
+
+<span id="ref-13">[13]</span> [Unity Texture2D.UpdateExternalTexture](https://docs.unity3d.com/ScriptReference/Texture2D.UpdateExternalTexture.html)
