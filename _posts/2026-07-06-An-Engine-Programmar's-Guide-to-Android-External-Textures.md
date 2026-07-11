@@ -1,6 +1,6 @@
 ---
 title: An Engine Programmer's Guide to Android External Textures
-date: 2026-05-30 00:53:35 +0800
+date: 2026-07-11 20:47:16 +0800
 categories: [Graphics]
 tags: [Android, Graphics]
 ---
