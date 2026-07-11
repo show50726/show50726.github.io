@@ -93,7 +93,12 @@ Let's talk about the most common Consumer first: `SurfaceTexture`.
 
 ## SurfaceTexture
 
-`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread [[2]](#ref-2). Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you wrap in an Android `Surface`.
+`SurfaceTexture` is the usual OpenGL ES path for Android external textures. It provides a `Surface` that producers can write into, while exposing the latest queued buffer as a `GL_TEXTURE_EXTERNAL_OES` texture to the rendering thread [[2]](#ref-2). 
+
+![surface-texture](/assets/img/external-textures/st.PNG)
+
+
+Basically, you generate an OpenGL texture ID and bind it to `GL_TEXTURE_EXTERNAL_OES`. You then pass that texture ID into a new `SurfaceTexture`, which you wrap in an Android `Surface`.
 
 ```kotlin
 // 1. Generate a standard OpenGL texture ID
